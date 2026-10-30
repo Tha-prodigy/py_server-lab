@@ -2,7 +2,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2Pas
 from fastapi import Depends, HTTPException, FastAPI
 from pydantic import BaseModel
 from data import Base, engine, get_async_db
-from model import User
+from model import User, SavedBooks
 from pwdlib import PasswordHash
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
@@ -33,6 +33,7 @@ def create_access_token(data: dict):
     return jwt.encode(to_encode, secret_key, algorithm)
 
 
+
 app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
@@ -56,22 +57,61 @@ def verify_password(password, hashed_password)-> bool:
 
 
 
-fake_user = {
-    "username": "daniel",
-    "password": "mypassword123",
-    "id": 1
-}
+async def get_current_user(credentials: HTTPAuthorizationCredentials= Depends(security), db : AsyncSession= Depends(get_async_db)):
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(token, secret_key,algorithms= [algorithm])
+        usr_id = payload.get('sub')
+
+        if usr_id == None:
+            raise HTTPException(401, 'authentication failed', headers={'WWW-Authenticate': 'Bearer'})
+
+        res = await db.execute(select(User).where(User.id == int(usr_id)))
+
+        usr = res.scalars().first()
+
+        if usr == None:
+            raise HTTPException(401, 'User not found')
+
+        return usr
+
+    except jwt.InvalidTokenError:
+
+        raise HTTPException(401, 'invalid or expired token', headers={'WWW-Authenticate': 'Bearer'})
+    
+
 
 class CreateUser(BaseModel):
     name : str
+    username : str
     password: str
     age: int
 
+class newUserResp(BaseModel):
+    id: int
+    name: str
+    username: str
 
-@app.post('/register')
+
+
+@app.post('/register', response_model= newUserResp, status_code=201)
 async def register_route(usr: CreateUser, db : AsyncSession= Depends(get_async_db)):
+
+    stmt = select(User).where(User.username== usr.username)
+    res = await db.execute(statement=stmt)
+    
+    # check if username already exists 
+    existing_usr = res.scalar_one_or_none()
+    if existing_usr:
+        raise HTTPException(
+            status_code=400,
+            detail= 'Username already exists'
+        )
+
     new_user = User(
         name = usr.name,
+        username = usr.username,
         password = hash_password(usr.password),
         age = usr.age
         
@@ -89,11 +129,16 @@ async def register_route(usr: CreateUser, db : AsyncSession= Depends(get_async_d
 
 
 @app.post('/login', response_model=Token)
-async def login_user(form_data : OAuth2PasswordRequestForm = Depends()):
-    if form_data.username != fake_user['username'] or form_data.password != fake_user['password']:
-        raise HTTPException(401, 'Incorrect username or password', {'WWW-Authenticate': 'Bearer' })
+async def login_user(form_data : OAuth2PasswordRequestForm = Depends(), db : AsyncSession = Depends(get_async_db)):
+    stmt = select(User).where(User.username == form_data.username)
+    res = await db.execute(stmt)
+    usr = res.scalar_one_or_none()
 
-    access_token = create_access_token({'sub': str(fake_user['id'])})
+    if usr == None or not verify_password(form_data.password, usr.password):
+        raise HTTPException(401, 'Invalid login credentials', headers={'WWW-Authenticate': 'Bearer'})
+        
+
+    access_token = create_access_token({'sub': str(usr.id)})
 
     return {
         'access_token': access_token,
@@ -102,28 +147,26 @@ async def login_user(form_data : OAuth2PasswordRequestForm = Depends()):
 
 
 @app.get('/proctected')
-async def protected_route(credentials: HTTPAuthorizationCredentials=Depends(security)):
-    token = credentials.credentials
-    print(token)
+async def protected_route(current_client = Depends(get_current_user)):
+    if current_client:
+        return {'message': 'You have been authenticated'}
 
-    try:
-        payload = jwt.decode(token, secret_key, algorithm)
 
-        user_id = payload.get('sub')
-        if user_id is None:
-            raise HTTPException(status_code= 401, detail={'message': 'You are not authorized'}, headers={'WWW-Authenticate': 'Bearer'})
+class SaveBook(BaseModel):
+    book_key: str
+    author: str
+    title: str
 
-        return {
-            'message': 'You have authorization',
-            'user-id': user_id
-        }
 
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            401,
-            {'message': 'invalid or expired token '},
-            headers={'WWW-Authenticate': 'Bearer'}
-        )
+
+@app.post('/save_book')
+async def save_book(
+    book: SavedBooks,
+    current_usr: User = Depends(get_current_user),
+    db: AsyncSession= Depends(get_async_db)
+):
+
+    select(SaveBook)
 
     
 
